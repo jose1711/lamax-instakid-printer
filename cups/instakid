@@ -1,0 +1,188 @@
+#!/usr/bin/python3
+"""CUPS backend `instakid` - print to a LAMAX InstaKid2 Plus over BLE.
+
+URI:  instakid://BQ95B                 (match by advertised name)
+      instakid://AA-BB-CC-DD-EE-FF     (match by address; ':' is written as '-')
+
+The data (a finished job from `rastertoinstakid`) is written to characteristic AE01
+(service 0xAE30). BlueZ must connect through org.bluez.Bearer.LE1, otherwise it tries
+BR/EDR and fails with "Page Timeout". The camera accepts a single client only.
+
+Exit codes: 0 OK, 1 FAILED, 6 RETRY (camera unavailable / transfer failed).
+Install: /usr/lib/cups/backend/instakid  (root:root, 0700)
+"""
+import asyncio
+import os
+import signal
+import sys
+import time
+
+CUPS_OK, CUPS_FAILED, CUPS_RETRY = 0, 1, 6
+DEFAULT_NAME = "BQ95B"
+CHAR_WRITE = "0000ae01-0000-1000-8000-00805f9b34fb"
+CHAR_NOTIFY = "0000ae02-0000-1000-8000-00805f9b34fb"
+SCAN_TIMEOUT = 30          # s - wait for the camera to advertise
+CONNECT_TIMEOUT = 30       # s - connect + service resolution
+SETTLE_BASE = 4.0          # s - let it finish printing after the last write
+SETTLE_PER_KB = 0.15       # s/kB - extra time depending on job size
+
+
+def log(level, msg):
+    sys.stderr.write(f"{level}: {msg}\n")
+    sys.stderr.flush()
+
+
+def state(s):
+    sys.stderr.write(f"STATE: {s}\n")
+    sys.stderr.flush()
+
+
+def parse_uri():
+    """Return (name, address) from DEVICE_URI."""
+    uri = os.environ.get("DEVICE_URI", "")
+    if not uri.startswith("instakid://"):
+        return DEFAULT_NAME, None
+    target = uri[len("instakid://"):].strip("/")
+    t = target.replace("-", ":").replace("_", ":").upper()
+    if len(t) == 17 and t.count(":") == 5:
+        return None, t
+    return (target or DEFAULT_NAME), None
+
+
+async def send(job: bytes, name, address):
+    from bleak import BleakScanner
+    from dbus_fast import BusType
+    from dbus_fast.aio import MessageBus
+
+    found = {}
+    seen = asyncio.Event()
+
+    def cb(dev, adv):
+        if (address and dev.address.upper() == address) or (name and (dev.name or adv.local_name) == name):
+            found["addr"] = dev.address.upper()
+            seen.set()
+
+    state("+connecting-to-device")
+    log("INFO", "Looking for the camera (switched on, not connected to the phone)...")
+    async with BleakScanner(cb, bluez={"filters": {"Transport": "le"}}):
+        try:
+            await asyncio.wait_for(seen.wait(), SCAN_TIMEOUT)
+        except asyncio.TimeoutError:
+            state("+offline-report")
+            log("ERROR", "Camera not available (switch it on, close Fun Print, keep the display awake)")
+            return CUPS_RETRY
+
+        addr = found["addr"]
+        dpath = "/org/bluez/hci0/dev_" + addr.replace(":", "_")
+        bus = await MessageBus(bus_type=BusType.SYSTEM, negotiate_unix_fd=True).connect()
+        intro = await bus.introspect("org.bluez", dpath)
+        dobj = bus.get_proxy_object("org.bluez", dpath, intro)
+        le = dobj.get_interface("org.bluez.Bearer.LE1")
+        log("INFO", "Connecting (LE)...")
+        try:
+            await asyncio.wait_for(le.call_connect(), CONNECT_TIMEOUT)
+        except Exception as e:  # noqa: BLE001
+            state("+offline-report")
+            log("ERROR", f"Connection failed: {e}")
+            return CUPS_RETRY
+
+    # scanner is stopped (one operation at a time); the connection stays
+    try:
+        props = dobj.get_interface("org.freedesktop.DBus.Properties")
+        deadline = time.monotonic() + CONNECT_TIMEOUT
+        while time.monotonic() < deadline:
+            if (await props.call_get("org.bluez.Device1", "ServicesResolved")).value:
+                break
+            await asyncio.sleep(0.1)
+        else:
+            state("+offline-report")
+            log("ERROR", "Camera services were not resolved")
+            return CUPS_RETRY
+
+        omi = await bus.introspect("org.bluez", "/")
+        om = bus.get_proxy_object("org.bluez", "/", omi).get_interface("org.freedesktop.DBus.ObjectManager")
+        objs = await om.call_get_managed_objects()
+        chars = {}
+        for path, ifs in objs.items():
+            ch = ifs.get("org.bluez.GattCharacteristic1")
+            if ch and path.startswith(dpath):
+                chars[ch["UUID"].value] = path
+        if CHAR_WRITE not in chars:
+            log("ERROR", "Characteristic AE01 not found - is this an InstaKid?")
+            return CUPS_FAILED
+
+        notes = []
+        if CHAR_NOTIFY in chars:
+            nint = await bus.introspect("org.bluez", chars[CHAR_NOTIFY])
+            nobj = bus.get_proxy_object("org.bluez", chars[CHAR_NOTIFY], nint)
+            nobj.get_interface("org.freedesktop.DBus.Properties").on_properties_changed(
+                lambda i, ch, inv: notes.append(bytes(ch["Value"].value)) if "Value" in ch else None)
+            await nobj.get_interface("org.bluez.GattCharacteristic1").call_start_notify()
+
+        wint = await bus.introspect("org.bluez", chars[CHAR_WRITE])
+        wch = bus.get_proxy_object("org.bluez", chars[CHAR_WRITE], wint).get_interface(
+            "org.bluez.GattCharacteristic1")
+        fd, mtu = await wch.call_acquire_write({})
+        chunk = min(max(mtu - 3, 20), 244)
+        state("-connecting-to-device")
+        state("-offline-report")
+        log("INFO", f"Printing ({len(job)} bytes, MTU {mtu})...")
+        try:
+            for i in range(0, len(job), chunk):
+                os.write(fd, job[i:i + chunk])
+                await asyncio.sleep(0.01)
+        finally:
+            os.close(fd)
+        await asyncio.sleep(SETTLE_BASE + SETTLE_PER_KB * len(job) / 1024)
+        log("INFO", f"Done ({len(notes)} notifications)")
+        return CUPS_OK
+    finally:
+        try:
+            await dobj.get_interface("org.bluez.Bearer.LE1").call_disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def discovery():
+    # With no arguments CUPS expects a list of available devices.
+    print('network instakid://BQ95B "LAMAX InstaKid2 Plus" "InstaKid2 Plus (BLE)" '
+          '"MFG:LAMAX;MDL:InstaKid2 Plus;CMD:INSTAKID;CLS:PRINTER;"')
+    return CUPS_OK
+
+
+def main():
+    if len(sys.argv) == 1:
+        return discovery()
+    if len(sys.argv) not in (6, 7):
+        sys.stderr.write(f"Usage: {sys.argv[0]} job-id user title copies options [file]\n")
+        return CUPS_FAILED
+
+    if len(sys.argv) == 7:
+        with open(sys.argv[6], "rb") as f:
+            job = f.read()
+    else:
+        job = sys.stdin.buffer.read()
+    if not job:
+        log("ERROR", "Empty job")
+        return CUPS_FAILED
+
+    name, address = parse_uri()
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(send(job, name, address))
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, task.cancel)
+    try:
+        return loop.run_until_complete(task)
+    except asyncio.CancelledError:
+        log("INFO", "Cancelled")
+        return CUPS_OK
+    except Exception as e:  # noqa: BLE001
+        state("+offline-report")
+        log("ERROR", f"Transfer failed: {type(e).__name__}: {e}")
+        return CUPS_RETRY
+    finally:
+        loop.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

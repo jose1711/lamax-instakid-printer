@@ -1,0 +1,19 @@
+# build output
+cups/rastertoinstakid
+__pycache__/
+*.pyc
+
+# captures and dumps (may contain personal data) - never commit
+*.pcap
+*.pcapng
+*.btsnoop
+*.apk
+bugreport/
+dumpstate*
+cap/
+apk/
+
+# local test output
+out*.job
+*.ras
+prev*.p*

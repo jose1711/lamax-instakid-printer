@@ -1,0 +1,113 @@
+*PPD-Adobe: "4.3"
+*%  LAMAX InstaKid2 Plus - thermal printing over BLE (cat-printer protocol).
+*%  Filter: rastertoinstakid, backend: instakid (instakid://BQ95B).
+*FormatVersion: "4.3"
+*FileVersion: "1.0"
+*LanguageVersion: English
+*LanguageEncoding: ISOLatin1
+*PCFileName: "instakid2.ppd"
+*Manufacturer: "LAMAX"
+*Product: "(InstaKid2 Plus)"
+*ModelName: "InstaKid2 Plus"
+*ShortNickName: "LAMAX InstaKid2 Plus"
+*NickName: "LAMAX InstaKid2 Plus (BLE thermal, 384 px)"
+*PSVersion: "(3010.000) 0"
+*LanguageLevel: "3"
+*ColorDevice: False
+*DefaultColorSpace: Gray
+*FileSystem: False
+*Throughput: "1"
+*LandscapeOrientation: Plus90
+*TTRasterizer: Type42
+*cupsVersion: 2.4
+*cupsModelNumber: 0
+*cupsManualCopies: False
+*cupsFilter: "application/vnd.cups-raster 100 rastertoinstakid"
+
+*% ---- Paper size (width fixed at 48 mm = 136 pt; length depends on the roll) ----
+*OpenUI *PageSize/Media Size: PickOne
+*OrderDependency: 10 AnySetup *PageSize
+*DefaultPageSize: 48x50mm
+*PageSize 48x30mm/48 x 30 mm: "<</PageSize[136 85]/ImagingBBox null>>setpagedevice"
+*PageSize 48x50mm/48 x 50 mm: "<</PageSize[136 142]/ImagingBBox null>>setpagedevice"
+*PageSize 48x75mm/48 x 75 mm: "<</PageSize[136 213]/ImagingBBox null>>setpagedevice"
+*PageSize 48x100mm/48 x 100 mm: "<</PageSize[136 283]/ImagingBBox null>>setpagedevice"
+*PageSize 48x150mm/48 x 150 mm: "<</PageSize[136 425]/ImagingBBox null>>setpagedevice"
+*CloseUI: *PageSize
+
+*OpenUI *PageRegion/Page Region: PickOne
+*OrderDependency: 10 AnySetup *PageRegion
+*DefaultPageRegion: 48x50mm
+*PageRegion 48x30mm/48 x 30 mm: "<</PageSize[136 85]/ImagingBBox null>>setpagedevice"
+*PageRegion 48x50mm/48 x 50 mm: "<</PageSize[136 142]/ImagingBBox null>>setpagedevice"
+*PageRegion 48x75mm/48 x 75 mm: "<</PageSize[136 213]/ImagingBBox null>>setpagedevice"
+*PageRegion 48x100mm/48 x 100 mm: "<</PageSize[136 283]/ImagingBBox null>>setpagedevice"
+*PageRegion 48x150mm/48 x 150 mm: "<</PageSize[136 425]/ImagingBBox null>>setpagedevice"
+*CloseUI: *PageRegion
+
+*DefaultImageableArea: 48x50mm
+*ImageableArea 48x30mm/48 x 30 mm: "0 0 136 85"
+*ImageableArea 48x50mm/48 x 50 mm: "0 0 136 142"
+*ImageableArea 48x75mm/48 x 75 mm: "0 0 136 213"
+*ImageableArea 48x100mm/48 x 100 mm: "0 0 136 283"
+*ImageableArea 48x150mm/48 x 150 mm: "0 0 136 425"
+
+*DefaultPaperDimension: 48x50mm
+*PaperDimension 48x30mm/48 x 30 mm: "136 85"
+*PaperDimension 48x50mm/48 x 50 mm: "136 142"
+*PaperDimension 48x75mm/48 x 75 mm: "136 213"
+*PaperDimension 48x100mm/48 x 100 mm: "136 283"
+*PaperDimension 48x150mm/48 x 150 mm: "136 425"
+
+*MaxMediaWidth: "136"
+*MaxMediaHeight: "2835"
+*HWMargins: 0 0 0 0
+*VariablePaperSize: True
+*CustomPageSize True: "pop pop pop <</PageSize[5 -2 roll]/ImagingBBox null>>setpagedevice"
+*ParamCustomPageSize Width: 1 points 136 136
+*ParamCustomPageSize Height: 2 points 28 2835
+*ParamCustomPageSize WidthOffset: 3 points 0 0
+*ParamCustomPageSize HeightOffset: 4 points 0 0
+*ParamCustomPageSize Orientation: 5 int 0 0
+
+*% ---- Resolution / raster: 203 dpi, 8-bit gray (the filter does the dithering) ----
+*OpenUI *Resolution/Output Resolution: PickOne
+*OrderDependency: 20 AnySetup *Resolution
+*DefaultResolution: 203dpi
+*Resolution 203dpi/203 dpi: "<</HWResolution[203 203]/cupsColorSpace 0/cupsColorOrder 0/cupsBitsPerColor 8/cupsCompression 0>>setpagedevice"
+*CloseUI: *Resolution
+
+*% ---- Filter options ----
+*OpenUI *Density/Print Density: PickOne
+*OrderDependency: 30 AnySetup *Density
+*DefaultDensity: Medium
+*Density Light/Light: ""
+*Density Medium/Medium: ""
+*Density Dark/Dark: ""
+*CloseUI: *Density
+
+*OpenUI *Dither/Dithering: PickOne
+*OrderDependency: 31 AnySetup *Dither
+*DefaultDither: FloydSteinberg
+*Dither FloydSteinberg/Floyd-Steinberg (photos): ""
+*Dither Threshold/Threshold (text, line art): ""
+*CloseUI: *Dither
+
+*OpenUI *TrimBlank/Trim Blank Space at End: Boolean
+*OrderDependency: 32 AnySetup *TrimBlank
+*DefaultTrimBlank: True
+*TrimBlank True/Yes: ""
+*TrimBlank False/No: ""
+*CloseUI: *TrimBlank
+
+*OpenUI *Feed/Paper Feed After Print: PickOne
+*OrderDependency: 33 AnySetup *Feed
+*DefaultFeed: 48
+*Feed 0/None: ""
+*Feed 24/Short: ""
+*Feed 48/Normal: ""
+*Feed 96/Long: ""
+*CloseUI: *Feed
+
+*DefaultFont: Courier
+*Font Courier: Standard "(002.004S)" Standard ROM
