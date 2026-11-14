@@ -60,8 +60,8 @@ or a custom length with a fixed 48 mm width.
 Tips:
 
 * The paper is only 48 mm wide. Set your document to that width — in LibreOffice Writer:
-  *Format → Page Style → Page*, paper format *User*, width 48 mm, small margins. A4 pages are
-  **not** scaled down, only the top-left corner would be printed.
+  *Format → Page Style → Page*, paper format *User*, width 48 mm, small margins. A text document
+  left on A4 is scaled down to fit (see below), so the text becomes tiny.
 * Pages wider than the paper (e.g. an image viewer printing on A4) are automatically cropped to
   their printed area and scaled to the paper width (`Oversize=FitContent`, default; `Crop` keeps
   only the left 48 mm). Blank rows at both ends are trimmed.
