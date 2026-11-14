@@ -13,6 +13,10 @@
  *   Dither=FloydSteinberg|Threshold
  *   TrimBlank=True|False        drop blank rows at the end of a page
  *   Feed=<lines>                paper feed after printing (default 48)
+ *   Oversize=FitContent|Crop    pages wider than the 384-dot paper (e.g. an image viewer
+ *                               printing on A4): FitContent crops to the printed area and
+ *                               scales it to the paper width (default); Crop keeps the
+ *                               left 384 dots only
  *
  * Build: gcc -O2 -Wall -o rastertoinstakid rastertoinstakid.c -lcups
  */
@@ -87,6 +91,65 @@ static int pixel_gray(const cups_page_header2_t *h, const unsigned char *row, un
   }
 }
 
+
+/* Resample the box [x0,x1)x[y0,y1) of an 8-bit gray image into a dw x dh image. */
+static unsigned char *resample(const unsigned char *g, unsigned stride, unsigned x0,
+                               unsigned y0, unsigned bw, unsigned bh, unsigned dw, unsigned dh)
+{
+  unsigned char *d = malloc((size_t)dw * dh);
+  unsigned dx, dy;
+  double sx = (double)bw / dw, sy = (double)bh / dh;
+
+  if (!d)
+    return NULL;
+
+  for (dy = 0; dy < dh; dy++)
+  {
+    for (dx = 0; dx < dw; dx++)
+    {
+      if (sx <= 1.0 && sy <= 1.0)
+      {
+        /* upscale: bilinear */
+        double fx = x0 + (dx + 0.5) * sx - 0.5, fy = y0 + (dy + 0.5) * sy - 0.5;
+        int ix = (int)(fx < 0 ? 0 : fx), iy = (int)(fy < 0 ? 0 : fy);
+        double tx = fx - ix, ty = fy - iy;
+        int ix1 = (ix + 1 < (int)(x0 + bw)) ? ix + 1 : ix;
+        int iy1 = (iy + 1 < (int)(y0 + bh)) ? iy + 1 : iy;
+        double v = g[(size_t)iy * stride + ix] * (1 - tx) * (1 - ty) +
+                   g[(size_t)iy * stride + ix1] * tx * (1 - ty) +
+                   g[(size_t)iy1 * stride + ix] * (1 - tx) * ty +
+                   g[(size_t)iy1 * stride + ix1] * tx * ty;
+        d[(size_t)dy * dw + dx] = (unsigned char)(v + 0.5);
+      }
+      else
+      {
+        /* downscale: box average over the source area */
+        unsigned ax = x0 + (unsigned)(dx * sx), bx = x0 + (unsigned)((dx + 1) * sx + 0.999);
+        unsigned ay = y0 + (unsigned)(dy * sy), by = y0 + (unsigned)((dy + 1) * sy + 0.999);
+        unsigned xx, yy;
+        unsigned long sum = 0, n = 0;
+
+        if (bx <= ax)
+          bx = ax + 1;
+        if (by <= ay)
+          by = ay + 1;
+        if (bx > x0 + bw)
+          bx = x0 + bw;
+        if (by > y0 + bh)
+          by = y0 + bh;
+        for (yy = ay; yy < by; yy++)
+          for (xx = ax; xx < bx; xx++)
+          {
+            sum += g[(size_t)yy * stride + xx];
+            n++;
+          }
+        d[(size_t)dy * dw + dx] = n ? (unsigned char)(sum / n) : 255;
+      }
+    }
+  }
+  return d;
+}
+
 static void emit_job(unsigned char *lines, unsigned nlines, int density, int feed)
 {
   static const unsigned energy[4] = { 0, 10000, 15000, 20000 };
@@ -130,7 +193,7 @@ static void emit_job(unsigned char *lines, unsigned nlines, int density, int fee
 
 int main(int argc, char *argv[])
 {
-  int fd, copies, density = 2, feed = 48, fs = 1, trim = 1, page = 0, nopt;
+  int fd, copies, density = 2, feed = 48, fs = 1, trim = 1, page = 0, nopt, fit_content = 1;
   cups_option_t *opts = NULL;
   cups_raster_t *ras;
   cups_page_header2_t h;
@@ -160,6 +223,8 @@ int main(int argc, char *argv[])
   if ((v = cupsGetOption("Dither", nopt, opts)) != NULL)
     fs = strcasecmp(v, "Threshold") != 0;
   trim = truthy(cupsGetOption("TrimBlank", nopt, opts), 1);
+  if ((v = cupsGetOption("Oversize", nopt, opts)) != NULL)
+    fit_content = strcasecmp(v, "Crop") != 0;
   if ((v = cupsGetOption("Feed", nopt, opts)) != NULL)
   {
     feed = atoi(v);
@@ -189,8 +254,9 @@ int main(int argc, char *argv[])
 
   while (cupsRasterReadHeader2(ras, &h))
   {
-    unsigned y, x, last;
-    unsigned char *row, *lines;
+    unsigned y, x, last, first, sw, sh, sstride;
+    unsigned char *row, *gray, *lines, *scaled = NULL;
+    const unsigned char *src;
     int *err_cur, *err_next;
 
     if (h.cupsBitsPerColor != 8 && h.cupsBitsPerColor != 1)
@@ -198,35 +264,105 @@ int main(int argc, char *argv[])
       fprintf(stderr, "ERROR: Unsupported bit depth %u\n", h.cupsBitsPerColor);
       return 1;
     }
-    if (h.cupsWidth > WIDTH)
-      fprintf(stderr, "WARNING: Width %u > %d, cropping\n", h.cupsWidth, WIDTH);
 
     page++;
     fprintf(stderr, "PAGE: %d %d\n", page, copies);
 
     row = malloc(h.cupsBytesPerLine);
-    lines = calloc(h.cupsHeight ? h.cupsHeight : 1, LINE_BYTES);
-    err_cur = calloc(WIDTH + 2, sizeof(int));
-    err_next = calloc(WIDTH + 2, sizeof(int));
-    if (!row || !lines || !err_cur || !err_next)
+    gray = malloc((size_t)(h.cupsWidth ? h.cupsWidth : 1) * (h.cupsHeight ? h.cupsHeight : 1));
+    if (!row || !gray)
     {
       fputs("ERROR: Out of memory\n", stderr);
       return 1;
     }
 
+    /* read the whole page as 8-bit brightness */
     for (y = 0; y < h.cupsHeight; y++)
     {
-      int *t;
-
       if (cupsRasterReadPixels(ras, row, h.cupsBytesPerLine) < 1)
       {
         fputs("ERROR: Error reading raster\n", stderr);
         return 1;
       }
+      for (x = 0; x < h.cupsWidth; x++)
+        gray[(size_t)y * h.cupsWidth + x] = (unsigned char)pixel_gray(&h, row, x);
+    }
+    free(row);
+
+    src = gray;
+    sw = h.cupsWidth;
+    sh = h.cupsHeight;
+    sstride = h.cupsWidth;
+
+    if (sw > WIDTH)
+    {
+      if (fit_content)
+      {
+        /* bounding box of the printed area (anything darker than ~96 % white) */
+        unsigned x0 = sw, x1 = 0, y0 = sh, y1 = 0;
+
+        for (y = 0; y < sh; y++)
+          for (x = 0; x < sw; x++)
+            if (gray[(size_t)y * sw + x] < 245)
+            {
+              if (x < x0) x0 = x;
+              if (x > x1) x1 = x;
+              if (y < y0) y0 = y;
+              if (y > y1) y1 = y;
+            }
+
+        if (x1 >= x0 && y1 >= y0)
+        {
+          unsigned bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+          double scale = (double)WIDTH / bw;
+          unsigned dw, dh;
+
+          if (scale > 3.0)
+            scale = 3.0;           /* do not blow up tiny content absurdly */
+          dw = (unsigned)(bw * scale + 0.5);
+          dh = (unsigned)(bh * scale + 0.5);
+          if (dw > WIDTH)
+            dw = WIDTH;
+          if (dw < 1)
+            dw = 1;
+          if (dh < 1)
+            dh = 1;
+          scaled = resample(gray, h.cupsWidth, x0, y0, bw, bh, dw, dh);
+          if (!scaled)
+          {
+            fputs("ERROR: Out of memory\n", stderr);
+            return 1;
+          }
+          fprintf(stderr, "INFO: Page is %u dots wide (paper %d): printed area %ux%u scaled to %ux%u\n",
+                  h.cupsWidth, WIDTH, bw, bh, dw, dh);
+          src = scaled;
+          sw = dw;
+          sh = dh;
+          sstride = dw;
+        }
+        else
+          fprintf(stderr, "INFO: Page is %u dots wide (paper %d) and blank\n", h.cupsWidth, WIDTH);
+      }
+      else
+        fprintf(stderr, "WARNING: Width %u > %d, cropping\n", h.cupsWidth, WIDTH);
+    }
+
+    lines = calloc(sh ? sh : 1, LINE_BYTES);
+    err_cur = calloc(WIDTH + 2, sizeof(int));
+    err_next = calloc(WIDTH + 2, sizeof(int));
+    if (!lines || !err_cur || !err_next)
+    {
+      fputs("ERROR: Out of memory\n", stderr);
+      return 1;
+    }
+
+    for (y = 0; y < sh; y++)
+    {
+      int *t;
 
       for (x = 0; x < WIDTH; x++)
       {
-        int g = (x < h.cupsWidth) ? pixel_gray(&h, row, x) : 255;
+        int g = (x < sw) ? src[(size_t)y * sstride + x] : 255;
         int v2, nv;
 
         if (fs)
@@ -258,7 +394,9 @@ int main(int argc, char *argv[])
       memset(err_next, 0, (WIDTH + 2) * sizeof(int));
     }
 
-    last = h.cupsHeight;
+    /* trim blank rows at both ends */
+    first = 0;
+    last = sh;
     if (trim)
     {
       while (last > 0)
@@ -272,17 +410,32 @@ int main(int argc, char *argv[])
         last--;
       }
       if (last == 0)
-        last = h.cupsHeight < 8 ? h.cupsHeight : 8;   /* blank page */
+        last = sh < 8 ? sh : 8;   /* blank page */
+      else
+      {
+        while (first < last)
+        {
+          unsigned char acc = 0;
+          unsigned i;
+          for (i = 0; i < LINE_BYTES; i++)
+            acc |= lines[(size_t)first * LINE_BYTES + i];
+          if (acc)
+            break;
+          first++;
+        }
+        first = first > 4 ? first - 4 : 0;   /* keep a small top margin */
+      }
     }
 
-    if (last > 0)
+    if (last > first)
     {
       int c;
       for (c = 0; c < copies; c++)
-        emit_job(lines, last, density, feed);
+        emit_job(lines + (size_t)first * LINE_BYTES, last - first, density, feed);
     }
 
-    free(row);
+    free(gray);
+    free(scaled);
     free(lines);
     free(err_cur);
     free(err_next);

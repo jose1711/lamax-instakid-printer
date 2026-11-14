@@ -100,6 +100,13 @@
 *TrimBlank False/No: ""
 *CloseUI: *TrimBlank
 
+*OpenUI *Oversize/Pages Wider Than the Paper: PickOne
+*OrderDependency: 34 AnySetup *Oversize
+*DefaultOversize: FitContent
+*Oversize FitContent/Scale printed area to paper width: ""
+*Oversize Crop/Crop to the left 48 mm: ""
+*CloseUI: *Oversize
+
 *OpenUI *Feed/Paper Feed After Print: PickOne
 *OrderDependency: 33 AnySetup *Feed
 *DefaultFeed: 48

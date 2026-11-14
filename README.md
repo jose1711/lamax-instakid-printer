@@ -53,7 +53,7 @@ sudo make add-printer          # lpadmin -p InstaKid2 -v instakid://BQ95B -P ...
 lp -d InstaKid2 -o fit-to-page examples/test.png
 ```
 
-Options (PPD, `lp -o`): `Density=Light|Medium|Dark`, `Dither=FloydSteinberg|Threshold`,
+Options (PPD, `lp -o`): `Density=Light|Medium|Dark`, `Dither=FloydSteinberg|Threshold`, `Oversize=FitContent|Crop`,
 `TrimBlank=True|False`, `Feed=0|24|48|96`, `PageSize=48x30mm|48x50mm|48x75mm|48x100mm|48x150mm`
 or a custom length with a fixed 48 mm width.
 
@@ -62,7 +62,10 @@ Tips:
 * The paper is only 48 mm wide. Set your document to that width — in LibreOffice Writer:
   *Format → Page Style → Page*, paper format *User*, width 48 mm, small margins. A4 pages are
   **not** scaled down, only the top-left corner would be printed.
-* For images use `-o fit-to-page`. For text try `-o cpi=15` (default is 10 cpi, ~24 columns).
+* Pages wider than the paper (e.g. an image viewer printing on A4) are automatically cropped to
+  their printed area and scaled to the paper width (`Oversize=FitContent`, default; `Crop` keeps
+  only the left 48 mm). Blank rows at both ends are trimmed.
+* For images `-o fit-to-page` also works. For text try `-o cpi=15` (default is 10 cpi, ~24 columns).
 * The backend runs as root (mode 0700, standard for CUPS backends). If the camera is off or
   busy it returns `CUPS_BACKEND_RETRY`, so the job stays queued and is retried.
 
