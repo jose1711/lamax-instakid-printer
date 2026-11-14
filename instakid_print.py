@@ -110,6 +110,8 @@ async def run(action, job, name, address, timeout):
         if (address and dev.address.upper() == address.upper()) or \
            (not address and (dev.name or adv.local_name) == name):
             found["addr"] = dev.address.upper()
+            # BlueZ object path from the scan (works with any adapter: hci0, hci1, ...)
+            found["path"] = (getattr(dev, "details", None) or {}).get("path")
             seen.set()
 
     print("Looking for the camera (switched on, not connected to the phone)...")
@@ -117,7 +119,7 @@ async def run(action, job, name, address, timeout):
         await asyncio.wait_for(seen.wait(), timeout)
         print("Found", found["addr"], "- connecting (LE)...")
         bus = await MessageBus(bus_type=BusType.SYSTEM, negotiate_unix_fd=True).connect()
-        dpath = "/org/bluez/hci0/dev_" + found["addr"].replace(":", "_")
+        dpath = found.get("path") or "/org/bluez/hci0/dev_" + found["addr"].replace(":", "_")
         intro = await bus.introspect("org.bluez", dpath)
         dobj = bus.get_proxy_object("org.bluez", dpath, intro)
         await dobj.get_interface("org.bluez.Bearer.LE1").call_connect()
@@ -128,6 +130,8 @@ async def run(action, job, name, address, timeout):
             if (await props.call_get("org.bluez.Device1", "ServicesResolved")).value:
                 break
             await asyncio.sleep(0.1)
+        else:
+            raise RuntimeError("camera services were not resolved within 10 s")
         omi = await bus.introspect("org.bluez", "/")
         om = bus.get_proxy_object("org.bluez", "/", omi).get_interface(
             "org.freedesktop.DBus.ObjectManager")
@@ -141,6 +145,9 @@ async def run(action, job, name, address, timeout):
                 print("CHAR", u, fl, "/".join(pth.rsplit("/", 2)[-2:]))
             return
 
+        for need in (CHAR_WRITE, CHAR_NOTIFY):
+            if need not in chars:
+                raise RuntimeError(f"characteristic {need} not found - is this an InstaKid?")
         notes = []
         npath = chars[CHAR_NOTIFY][0]
         nint = await bus.introspect("org.bluez", npath)
@@ -156,10 +163,12 @@ async def run(action, job, name, address, timeout):
         fd, mtu = await wch.call_acquire_write({})
         chunk = min(max(mtu - 3, 20), 244)
         print(f"Sending {len(job)} bytes in {chunk}-byte writes (MTU {mtu})...")
-        for i in range(0, len(job), chunk):
-            os.write(fd, job[i:i + chunk])
-            await asyncio.sleep(0.01)
-        os.close(fd)
+        try:
+            for i in range(0, len(job), chunk):
+                os.write(fd, job[i:i + chunk])
+                await asyncio.sleep(0.01)
+        finally:
+            os.close(fd)
         await asyncio.sleep(4 + len(job) / 1024 * 0.15)   # let it finish printing
         for n in notes:
             print("notify", n.hex())
@@ -197,7 +206,12 @@ def main():
         print(f"{len(lines)} lines, job {len(job)} bytes")
         if a.dry_run:
             return
-    asyncio.run(run(a.cmd, job, a.name, a.address, a.timeout))
+    try:
+        asyncio.run(run(a.cmd, job, a.name, a.address, a.timeout))
+    except asyncio.TimeoutError:
+        sys.exit("Camera not found: switch it on, close the phone app and keep the display awake.")
+    except (RuntimeError, OSError) as e:
+        sys.exit(f"Error: {e}")
 
 
 if __name__ == "__main__":

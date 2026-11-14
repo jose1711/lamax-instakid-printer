@@ -11,7 +11,8 @@
  * Options (PPD / lp -o):
  *   Density=Light|Medium|Dark   energy 10000/15000/20000
  *   Dither=FloydSteinberg|Threshold
- *   TrimBlank=True|False        drop blank rows at the end of a page
+ *   TrimBlank=True|False        drop blank rows at the end of a page (and at the start of
+ *                               pages that were scaled down by Oversize=FitContent)
  *   Feed=<lines>                paper feed after printing (default 48)
  *   Oversize=FitContent|Crop    pages wider than the 384-dot paper (e.g. an image viewer
  *                               printing on A4): FitContent crops to the printed area and
@@ -31,6 +32,8 @@
 #include <unistd.h>
 
 #define WIDTH      384
+#define MAX_DIM    20000                 /* dots, per side */
+#define MAX_PIXELS (150ULL * 1000 * 1000)  /* 150 Mpx page buffer limit */
 #define LINE_BYTES (WIDTH / 8)
 
 static unsigned char crc8(const unsigned char *d, size_t n)
@@ -92,13 +95,18 @@ static int pixel_gray(const cups_page_header2_t *h, const unsigned char *row, un
 }
 
 
-/* Resample the box [x0,x1)x[y0,y1) of an 8-bit gray image into a dw x dh image. */
+/*
+ * Resample the box [x0,x0+bw) x [y0,y0+bh) of an 8-bit gray image into a dw x dh image.
+ * Enlarging uses bilinear interpolation, shrinking a box average. The mode is chosen once
+ * from the overall scale; sampling never leaves the box.
+ */
 static unsigned char *resample(const unsigned char *g, unsigned stride, unsigned x0,
                                unsigned y0, unsigned bw, unsigned bh, unsigned dw, unsigned dh)
 {
   unsigned char *d = malloc((size_t)dw * dh);
   unsigned dx, dy;
   double sx = (double)bw / dw, sy = (double)bh / dh;
+  int enlarge = (sx + sy) / 2.0 <= 1.0;
 
   if (!d)
     return NULL;
@@ -107,23 +115,34 @@ static unsigned char *resample(const unsigned char *g, unsigned stride, unsigned
   {
     for (dx = 0; dx < dw; dx++)
     {
-      if (sx <= 1.0 && sy <= 1.0)
+      if (enlarge)
       {
-        /* upscale: bilinear */
-        double fx = x0 + (dx + 0.5) * sx - 0.5, fy = y0 + (dy + 0.5) * sy - 0.5;
-        int ix = (int)(fx < 0 ? 0 : fx), iy = (int)(fy < 0 ? 0 : fy);
-        double tx = fx - ix, ty = fy - iy;
-        int ix1 = (ix + 1 < (int)(x0 + bw)) ? ix + 1 : ix;
-        int iy1 = (iy + 1 < (int)(y0 + bh)) ? iy + 1 : iy;
-        double v = g[(size_t)iy * stride + ix] * (1 - tx) * (1 - ty) +
-                   g[(size_t)iy * stride + ix1] * tx * (1 - ty) +
-                   g[(size_t)iy1 * stride + ix] * (1 - tx) * ty +
-                   g[(size_t)iy1 * stride + ix1] * tx * ty;
+        double fx = (dx + 0.5) * sx - 0.5, fy = (dy + 0.5) * sy - 0.5;   /* relative to the box */
+        int ix, iy, ix1, iy1;
+        double tx, ty, v;
+
+        if (fx < 0)
+          fx = 0;
+        if (fy < 0)
+          fy = 0;
+        ix = (int)fx;
+        iy = (int)fy;
+        if (ix > (int)bw - 1)
+          ix = (int)bw - 1;
+        if (iy > (int)bh - 1)
+          iy = (int)bh - 1;
+        tx = fx - ix;
+        ty = fy - iy;
+        ix1 = (ix + 1 < (int)bw) ? ix + 1 : ix;
+        iy1 = (iy + 1 < (int)bh) ? iy + 1 : iy;
+        v = g[(size_t)(y0 + iy) * stride + x0 + ix] * (1 - tx) * (1 - ty) +
+            g[(size_t)(y0 + iy) * stride + x0 + ix1] * tx * (1 - ty) +
+            g[(size_t)(y0 + iy1) * stride + x0 + ix] * (1 - tx) * ty +
+            g[(size_t)(y0 + iy1) * stride + x0 + ix1] * tx * ty;
         d[(size_t)dy * dw + dx] = (unsigned char)(v + 0.5);
       }
       else
       {
-        /* downscale: box average over the source area */
         unsigned ax = x0 + (unsigned)(dx * sx), bx = x0 + (unsigned)((dx + 1) * sx + 0.999);
         unsigned ay = y0 + (unsigned)(dy * sy), by = y0 + (unsigned)((dy + 1) * sy + 0.999);
         unsigned xx, yy;
@@ -148,6 +167,64 @@ static unsigned char *resample(const unsigned char *g, unsigned stride, unsigned
     }
   }
   return d;
+}
+
+/*
+ * Bounding box of the printed area of an 8-bit gray page. Isolated specks are ignored:
+ * a row/column counts only if it has at least MIN_DARK dark pixels. If nothing is darker
+ * than 245, very light content (down to 252) is tried before the page is called blank.
+ */
+#define MIN_DARK 8
+
+static int content_bbox(const unsigned char *g, unsigned w, unsigned h,
+                        unsigned *x0, unsigned *x1, unsigned *y0, unsigned *y1)
+{
+  static const unsigned char thr[2] = { 245, 252 };
+  unsigned *cols = calloc(w, sizeof(unsigned)), *rows = calloc(h, sizeof(unsigned));
+  unsigned t, x, y;
+  int found = 0;
+
+  if (!cols || !rows)
+  {
+    free(cols);
+    free(rows);
+    return -1;
+  }
+
+  for (t = 0; t < 2 && !found; t++)
+  {
+    memset(cols, 0, w * sizeof(unsigned));
+    memset(rows, 0, h * sizeof(unsigned));
+    for (y = 0; y < h; y++)
+      for (x = 0; x < w; x++)
+        if (g[(size_t)y * w + x] < thr[t])
+        {
+          cols[x]++;
+          rows[y]++;
+        }
+
+    *x0 = w;
+    *x1 = 0;
+    *y0 = h;
+    *y1 = 0;
+    for (x = 0; x < w; x++)
+      if (cols[x] >= MIN_DARK)
+      {
+        if (x < *x0) *x0 = x;
+        if (x > *x1) *x1 = x;
+      }
+    for (y = 0; y < h; y++)
+      if (rows[y] >= MIN_DARK)
+      {
+        if (y < *y0) *y0 = y;
+        if (y > *y1) *y1 = y;
+      }
+    found = (*x1 >= *x0 && *y1 >= *y0);
+  }
+
+  free(cols);
+  free(rows);
+  return found;
 }
 
 static void emit_job(unsigned char *lines, unsigned nlines, int density, int feed)
@@ -254,7 +331,8 @@ int main(int argc, char *argv[])
 
   while (cupsRasterReadHeader2(ras, &h))
   {
-    unsigned y, x, last, first, sw, sh, sstride;
+    unsigned y, x, last, first, sw, sh, sstride, xoff = 0;
+    int was_scaled = 0;
     unsigned char *row, *gray, *lines, *scaled = NULL;
     const unsigned char *src;
     int *err_cur, *err_next;
@@ -262,6 +340,19 @@ int main(int argc, char *argv[])
     if (h.cupsBitsPerColor != 8 && h.cupsBitsPerColor != 1)
     {
       fprintf(stderr, "ERROR: Unsupported bit depth %u\n", h.cupsBitsPerColor);
+      return 1;
+    }
+    if (h.cupsWidth == 0 || h.cupsHeight == 0 || h.cupsWidth > MAX_DIM || h.cupsHeight > MAX_DIM ||
+        (unsigned long long)h.cupsWidth * h.cupsHeight > MAX_PIXELS)
+    {
+      fprintf(stderr, "ERROR: Unsupported page size %ux%u dots\n", h.cupsWidth, h.cupsHeight);
+      return 1;
+    }
+    if (h.cupsNumColors < 1 || h.cupsNumColors > 4 ||
+        h.cupsBytesPerLine < ((unsigned)h.cupsWidth * h.cupsBitsPerColor * h.cupsNumColors + 7) / 8)
+    {
+      fprintf(stderr, "ERROR: Inconsistent raster header (bytes per line %u, colors %u)\n",
+              h.cupsBytesPerLine, h.cupsNumColors);
       return 1;
     }
 
@@ -298,20 +389,16 @@ int main(int argc, char *argv[])
     {
       if (fit_content)
       {
-        /* bounding box of the printed area (anything darker than ~96 % white) */
-        unsigned x0 = sw, x1 = 0, y0 = sh, y1 = 0;
+        unsigned x0, x1, y0, y1;
+        int bb = content_bbox(gray, sw, sh, &x0, &x1, &y0, &y1);
 
-        for (y = 0; y < sh; y++)
-          for (x = 0; x < sw; x++)
-            if (gray[(size_t)y * sw + x] < 245)
-            {
-              if (x < x0) x0 = x;
-              if (x > x1) x1 = x;
-              if (y < y0) y0 = y;
-              if (y > y1) y1 = y;
-            }
+        if (bb < 0)
+        {
+          fputs("ERROR: Out of memory\n", stderr);
+          return 1;
+        }
 
-        if (x1 >= x0 && y1 >= y0)
+        if (bb)
         {
           unsigned bw = x1 - x0 + 1, bh = y1 - y0 + 1;
           double scale = (double)WIDTH / bw;
@@ -339,6 +426,8 @@ int main(int argc, char *argv[])
           sw = dw;
           sh = dh;
           sstride = dw;
+          xoff = (WIDTH - dw) / 2;       /* centre content narrower than the paper */
+          was_scaled = 1;
         }
         else
           fprintf(stderr, "INFO: Page is %u dots wide (paper %d) and blank\n", h.cupsWidth, WIDTH);
@@ -362,7 +451,7 @@ int main(int argc, char *argv[])
 
       for (x = 0; x < WIDTH; x++)
       {
-        int g = (x < sw) ? src[(size_t)y * sstride + x] : 255;
+        int g = (x >= xoff && x - xoff < sw) ? src[(size_t)y * sstride + (x - xoff)] : 255;
         int v2, nv;
 
         if (fs)
@@ -411,7 +500,7 @@ int main(int argc, char *argv[])
       }
       if (last == 0)
         last = sh < 8 ? sh : 8;   /* blank page */
-      else
+      else if (was_scaled)
       {
         while (first < last)
         {

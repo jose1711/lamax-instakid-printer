@@ -7,7 +7,7 @@ MEDIA          ?= 48x50mm
 all: cups/rastertoinstakid
 
 cups/rastertoinstakid: cups/rastertoinstakid.c
-	$(CC) $(CFLAGS) -O2 -Wall -o $@ $< $(shell cups-config --libs)
+	$(CC) $(CFLAGS) -O2 -Wall -o $@ $< $(LDFLAGS) $(shell cups-config --libs)
 
 install: all
 	install -D -m 755 cups/rastertoinstakid $(DESTDIR)$(CUPS_SERVERBIN)/filter/rastertoinstakid
@@ -29,7 +29,7 @@ uninstall:
 
 # offline checks (no printer needed)
 check: all
-	cupstestppd -W translations -W sizes cups/instakid2.ppd || true
+	cupstestppd -I filters -W translations -W sizes cups/instakid2.ppd
 	python3 -c "import ast;[ast.parse(open(f).read()) for f in ('cups/instakid','cups/verify_job.py','instakid_print.py','tools/nrf_follow.py')]; print('python syntax ok')"
 
 clean:

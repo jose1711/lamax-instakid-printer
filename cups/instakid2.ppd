@@ -93,7 +93,7 @@
 *Dither Threshold/Threshold (text, line art): ""
 *CloseUI: *Dither
 
-*OpenUI *TrimBlank/Trim Blank Space at End: Boolean
+*OpenUI *TrimBlank/Trim Blank Space (end; start of scaled pages): Boolean
 *OrderDependency: 32 AnySetup *TrimBlank
 *DefaultTrimBlank: True
 *TrimBlank True/Yes: ""

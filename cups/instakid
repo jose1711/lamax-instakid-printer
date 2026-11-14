@@ -60,6 +60,8 @@ async def send(job: bytes, name, address):
     def cb(dev, adv):
         if (address and dev.address.upper() == address) or (name and (dev.name or adv.local_name) == name):
             found["addr"] = dev.address.upper()
+            # BlueZ object path from the scan (works with any adapter: hci0, hci1, ...)
+            found["path"] = (getattr(dev, "details", None) or {}).get("path")
             seen.set()
 
     state("+connecting-to-device")
@@ -73,7 +75,7 @@ async def send(job: bytes, name, address):
             return CUPS_RETRY
 
         addr = found["addr"]
-        dpath = "/org/bluez/hci0/dev_" + addr.replace(":", "_")
+        dpath = found.get("path") or "/org/bluez/hci0/dev_" + addr.replace(":", "_")
         bus = await MessageBus(bus_type=BusType.SYSTEM, negotiate_unix_fd=True).connect()
         intro = await bus.introspect("org.bluez", dpath)
         dobj = bus.get_proxy_object("org.bluez", dpath, intro)
